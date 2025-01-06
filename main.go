@@ -11,7 +11,7 @@ import (
 )
 
 type Produk struct {
-	ID        int    `json:"id"`
+	ID        int    `json:"id" gorm:"primaryKey;autoIncrement"`
 	Nama      string `json:"nama"`
 	Stok      int    `json:"stok"`
 	Terjual   int    `json:"terjual"`
@@ -30,6 +30,9 @@ func initDatabase() {
 		panic("Gagal terhubung ke database")
 	}
 	fmt.Println("Berhasil terhubung ke database")
+
+	// AutoMigrate untuk memastikan tabel ada
+	db.AutoMigrate(&Produk{})
 }
 
 func loadProdukToCache() {
@@ -43,24 +46,13 @@ func loadProdukToCache() {
 	}
 }
 
-func getProdukByID(id int) (Produk, bool) {
-	if produk, exists := produkCache[id]; exists {
-		return produk, true
-	}
-	var produk Produk
-	if err := db.First(&produk, id).Error; err != nil {
-		return Produk{}, false
-	}
-	produkCache[id] = produk
-	return produk, true
-}
-
 func main() {
 	initDatabase()
 	loadProdukToCache()
 
 	r := gin.Default()
 
+	// GET: Semua Produk
 	r.GET("/api/produk", func(c *gin.Context) {
 		var produkList []Produk
 		if err := db.Find(&produkList).Error; err != nil {
@@ -70,57 +62,67 @@ func main() {
 		c.JSON(http.StatusOK, produkList)
 	})
 
+	// GET: Produk by ID
 	r.GET("/api/produk/:id", func(c *gin.Context) {
-		idStr := c.Param("id")
-		id, err := strconv.Atoi(idStr)
+		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"pesan": "ID harus berupa angka"})
 			return
 		}
 
-		produk, exists := getProdukByID(id)
-		if exists {
+		if produk, exists := produkCache[id]; exists {
 			c.JSON(http.StatusOK, produk)
 		} else {
-			c.JSON(http.StatusNotFound, gin.H{"pesan": "Produk tidak ditemukan"})
-		}
-	})
-
-	r.POST("/api/produk", func(c *gin.Context) {
-		var produkBaru Produk
-		if err := c.ShouldBindJSON(&produkBaru); err == nil {
-			if err := db.Create(&produkBaru).Error; err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Gagal menambahkan produk"})
+			var produk Produk
+			if err := db.First(&produk, id).Error; err != nil {
+				c.JSON(http.StatusNotFound, gin.H{"pesan": "Produk tidak ditemukan"})
 				return
 			}
-			produkCache[produkBaru.ID] = produkBaru
-			c.JSON(http.StatusCreated, produkBaru)
-		} else {
+			produkCache[id] = produk
+			c.JSON(http.StatusOK, produk)
+		}
+	})
+
+	// POST: Tambah Produk Baru
+	r.POST("/api/produk", func(c *gin.Context) {
+		var produkBaru Produk
+		if err := c.ShouldBindJSON(&produkBaru); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"pesan": "Input tidak valid"})
-		}
-	})
-
-	r.DELETE("/api/produk/:id", func(c *gin.Context) {
-		idStr := c.Param("id")
-		id, err := strconv.Atoi(idStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"pesan": "ID harus berupa angka"})
 			return
 		}
 
-		if err := db.Delete(&Produk{}, id).Error; err != nil {
-			c.JSON(http.StatusNotFound, gin.H{"pesan": "Produk tidak ditemukan"})
+		if err := db.Create(&produkBaru).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Gagal menambahkan produk"})
 			return
 		}
 
-		delete(produkCache, id)
-
-		c.JSON(http.StatusOK, gin.H{"pesan": "Produk berhasil dihapus"})
+		produkCache[produkBaru.ID] = produkBaru
+		c.JSON(http.StatusCreated, produkBaru)
 	})
 
+	// DELETE: Hapus Semua Produk dan Reset ID
+	r.DELETE("/api/produk", func(c *gin.Context) {
+		// Hapus semua data
+		if err := db.Exec("DELETE FROM produks").Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Gagal menghapus semua produk"})
+			return
+		}
+
+		// Reset auto-increment ID ke 1
+		if err := db.Exec("ALTER TABLE produks AUTO_INCREMENT = 1").Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Gagal mereset ID produk"})
+			return
+		}
+
+		// Kosongkan cache
+		produkCache = map[int]Produk{}
+
+		c.JSON(http.StatusOK, gin.H{"pesan": "Semua produk berhasil dihapus dan ID telah direset"})
+	})
+
+	// PATCH: Update Produk by ID
 	r.PATCH("/api/produk/:id", func(c *gin.Context) {
-		idStr := c.Param("id")
-		id, err := strconv.Atoi(idStr)
+		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"pesan": "ID harus berupa angka"})
 			return
@@ -144,8 +146,38 @@ func main() {
 		}
 
 		produkCache[produk.ID] = produk
-
 		c.JSON(http.StatusOK, produk)
+	})
+
+	// DELETE: Hapus Produk by ID
+	r.DELETE("/api/produk/:id", func(c *gin.Context) {
+		id, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"pesan": "ID harus berupa angka"})
+			return
+		}
+
+		// Periksa apakah produk dengan ID tersebut ada di database
+		var produk Produk
+		if err := db.First(&produk, id).Error; err != nil {
+			if err == gorm.ErrRecordNotFound {
+				c.JSON(http.StatusNotFound, gin.H{"pesan": "Produk tidak ditemukan"})
+			} else {
+				c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Terjadi kesalahan pada server"})
+			}
+			return
+		}
+
+		// Hapus produk dari database
+		if err := db.Delete(&produk).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"pesan": "Gagal menghapus produk"})
+			return
+		}
+
+		// Hapus dari cache jika ada
+		delete(produkCache, id)
+
+		c.JSON(http.StatusOK, gin.H{"pesan": "Produk berhasil dihapus"})
 	})
 
 	r.Run(":8000")
